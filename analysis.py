@@ -128,3 +128,112 @@ def load_raw(save: bool = True) -> pd.DataFrame:
     if save:
         raw.to_csv(DATA / "raw_worldbank.csv", index=False)
     return raw
+
+
+# =============================================================================
+# 2. Panel construction and transformations
+# =============================================================================
+def build_panel(raw: pd.DataFrame) -> pd.DataFrame:
+    """Country-year panel with the regressors specified in plan.md §3."""
+    df = raw.sort_values(["iso3", "year"]).copy()
+    cols = list(INDICATORS.values())
+
+    # Carry forward short reporting gaps only. A two-year cap is a judgement
+    # call: long enough to bridge a missed WDI vintage, short enough that we are
+    # not inventing a decade of synthetic variation. Interpolation would be the
+    # alternative, but it leaks future information into the lag structure.
+    df[cols] = df.groupby("iso3")[cols].ffill(limit=2)
+
+    g = df.groupby("iso3")
+    df["d_credit"] = g["credit_gdp"].diff()       # ΔCredit/GDP_t, the flow measure
+    df["credit_lag"] = g["credit_gdp"].shift(1)   # Credit/GDP_{t-1}, the stock measure
+    # Predetermining the stock does not buy exogeneity — growth is serially
+    # correlated, so last year's depth is still correlated with this year's
+    # shock — but it removes the purely mechanical same-period simultaneity.
+    df["latam"] = (df["iso3"] != "USA").astype(int)
+    df["hyper"] = [
+        iso in HYPERINFLATION and yr < HYPERINFLATION[iso]
+        for iso, yr in zip(df["iso3"], df["year"])
+    ]
+
+    df = df[df["year"].between(START, END)]
+    return df.dropna(subset=["credit_gdp", "gdp_pc_growth"])
+
+
+def country_panel(panel: pd.DataFrame) -> pd.DataFrame:
+    """Estimation sample: the seven individual economies.
+
+    The LCN regional aggregate is excluded. It is a weighted composite of the
+    same Latin American economies, so keeping it would double-count them and
+    understate the standard errors.
+    """
+    return panel[panel["iso3"] != "LCN"].copy()
+
+
+def regional_series(panel: pd.DataFrame) -> pd.DataFrame:
+    """USA vs. population-weighted LatAm-6 aggregate, for the time-series chart.
+
+    Population weights (plan.md §3) stop Chile and Peru from counting as much as
+    Brazil and Mexico in the regional average. Note the resulting series is a
+    weighted mean of ratios, not the ratio of regional totals — the two differ,
+    and the latter would be preferable if the WDI published regional credit
+    stocks in levels.
+    """
+    latam = panel[panel["iso3"].isin(LATAM)]
+    rows = []
+    for year, grp in latam.groupby("year"):
+        w = grp["population"]
+        rows.append({
+            "year": year,
+            "credit_gdp": np.average(grp["credit_gdp"], weights=w),
+            "gdp_pc_growth": np.average(grp["gdp_pc_growth"], weights=w),
+            "n_countries": len(grp),
+            "region": "LatAm",
+        })
+    agg = pd.DataFrame(rows)
+
+    usa = (panel[panel["iso3"] == "USA"][["year", "credit_gdp", "gdp_pc_growth"]]
+           .assign(n_countries=1, region="USA"))
+
+    reg = pd.concat([usa, agg], ignore_index=True).sort_values(["region", "year"])
+    # Five-year rolling means strip the business cycle so the chart shows the
+    # structural trend rather than the 2009 and 2020 troughs.
+    for col in ("credit_gdp", "gdp_pc_growth"):
+        reg[f"{col}_roll5"] = reg.groupby("region")[col].transform(
+            lambda s: s.rolling(5, min_periods=3).mean()
+        )
+    return reg
+
+
+def quinquennial(panel: pd.DataFrame) -> pd.DataFrame:
+    """Collapse to non-overlapping five-year averages.
+
+    This is the standard unit of observation in the empirical growth literature
+    (Levine, Loayza & Beck 2000; Beck & Levine 2004). Annual growth rates are
+    dominated by cyclical noise, and the theory being tested is about capital
+    accumulation and allocative efficiency, which operate over a horizon of
+    years. Averaging also attenuates the recession-denominator artifact, since
+    output gaps substantially close within a five-year window.
+    """
+    d = panel.copy()
+    d["period"] = (d["year"] - START) // 5
+    rows = []
+    for (iso, period), grp in d.groupby(["iso3", "period"]):
+        grp = grp.sort_values("year")
+        if len(grp) < 3:          # require most of the window to be observed
+            continue
+        rows.append({
+            "iso3": iso,
+            "period": period,
+            "period_label": f"{grp['year'].iloc[0]}-{str(grp['year'].iloc[-1])[-2:]}",
+            "year_mid": grp["year"].mean(),
+            "growth": grp["gdp_pc_growth"].mean(),
+            # Initial depth, not period-average depth: a predetermined
+            # conditioning variable is the convention, and it keeps the
+            # regressor from being contemporaneous with the outcome.
+            "credit_initial": grp["credit_gdp"].iloc[0],
+            "d_credit": grp["credit_gdp"].iloc[-1] - grp["credit_gdp"].iloc[0],
+            "latam": int(iso != "USA"),
+            "hyper": bool(grp["hyper"].any()),
+        })
+    return pd.DataFrame(rows)
