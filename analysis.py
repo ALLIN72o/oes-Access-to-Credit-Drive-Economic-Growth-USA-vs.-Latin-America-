@@ -237,3 +237,190 @@ def quinquennial(panel: pd.DataFrame) -> pd.DataFrame:
             "hyper": bool(grp["hyper"].any()),
         })
     return pd.DataFrame(rows)
+
+
+# =============================================================================
+# 4. Figures
+# =============================================================================
+SOURCE = "World Bank, World Development Indicators"
+LATAM_NOTE = "LatAm-6: Argentina, Brazil, Chile, Colombia, Mexico, Peru, weighted by population"
+
+
+def chart1_dual_axis(reg: pd.DataFrame):
+    """Chart 1 as specified in plan.md: credit depth and growth on two scales.
+
+    A caveat worth keeping in mind when reading it: with two y-scales the eye
+    reads crossings and relative slopes as meaningful when they are an artifact
+    of where the axis limits were set. Solid/dashed encodes which scale a line
+    belongs to, and each line is labelled at its right-hand end, but
+    `chart1b_panels.png` plots the same data on separate scales and is the
+    safer of the two for drawing conclusions.
+    """
+    fig, ax = plt.subplots(figsize=(9.5, 5.6))
+    ax2 = ax.twinx()
+
+    for region, grp in reg.groupby("region"):
+        c = es.SERIES[region]
+        ax.plot(grp["year"], grp["credit_gdp"], color=c, lw=2.2, solid_capstyle="round",
+                zorder=3)
+        ax2.plot(grp["year"], grp["gdp_pc_growth_roll5"], color=c, lw=1.6,
+                 linestyle=(0, (4, 2)), zorder=3)
+
+    # Direct labels at the right-hand end of each line, in the series color,
+    # so the chart is readable without consulting a legend.
+    for region, grp in reg.groupby("region"):
+        c, last = es.SERIES[region], grp.dropna(subset=["gdp_pc_growth_roll5"]).iloc[-1]
+        ax.annotate(f"{region}\ncredit", (last["year"], last["credit_gdp"]),
+                    xytext=(7, 0), textcoords="offset points", va="center",
+                    fontsize=9, color=c, fontweight="bold", linespacing=1.1)
+        ax2.annotate(f"{region}\ngrowth", (last["year"], last["gdp_pc_growth_roll5"]),
+                     xytext=(7, 0), textcoords="offset points", va="center",
+                     fontsize=9, color=c, linespacing=1.1)
+
+    ax.set_ylim(0, 240)
+    ax2.set_ylim(-4, 8)
+    ax.set_xlim(START - 0.5, END + 5.5)      # right-hand room for the labels
+    ax.set_xticks(range(START, END, 5))      # no tick past the end of the data
+
+    es.axes(ax, units="Credit to private sector, % of GDP (solid)", y_right=False)
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["left"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+    ax2.tick_params(axis="y", length=0, labelsize=9.5)
+    # The growth zero line belongs to the right-hand scale only. Drawn in full
+    # ink it would read as a left-axis gridline sitting at 80% of GDP, so it is
+    # kept faint and the "0" tick on the right axis carries the meaning.
+    ax2.axhline(0, color=es.GRID, lw=1.0, linestyle=(0, (2, 2)), zorder=1)
+    es.units_right(ax2, "Real GDP per person, 5-yr avg % change (dashed)")
+
+    es.finish(
+        fig,
+        title="Deep but not dynamic",
+        subtitle="Private credit and economic growth, 1990-2023",
+        source=SOURCE,
+        note=f"{LATAM_NOTE}. Growth series smoothed with a five-year rolling mean.",
+        top_in=1.30, right_in=1.05,
+    )
+    fig.savefig(FIGS / "chart1_dual_axis.png", dpi=200)
+    plt.close(fig)
+
+
+def chart1b_panels(reg: pd.DataFrame):
+    """The same data on separate scales — the honest version of chart 1."""
+    fig, (top, bot) = plt.subplots(2, 1, figsize=(9.5, 6.6), sharex=True)
+    for region, grp in reg.groupby("region"):
+        c = es.SERIES[region]
+        top.plot(grp["year"], grp["credit_gdp"], color=c, lw=2.2)
+        bot.plot(grp["year"], grp["gdp_pc_growth"], color=c, lw=1, alpha=0.35)
+        bot.plot(grp["year"], grp["gdp_pc_growth_roll5"], color=c, lw=2.2)
+        last = grp.dropna(subset=["gdp_pc_growth_roll5"]).iloc[-1]
+        top.annotate(region, (last["year"], last["credit_gdp"]), xytext=(7, 0),
+                     textcoords="offset points", va="center", fontsize=9.5,
+                     color=c, fontweight="bold")
+        bot.annotate(region, (last["year"], last["gdp_pc_growth_roll5"]),
+                     xytext=(7, 0), textcoords="offset points", va="center",
+                     fontsize=9.5, color=c, fontweight="bold")
+
+    top.set_xlim(START - 0.5, END + 3.5)
+    bot.set_xticks(range(START, END, 5))
+    es.axes(top, units="Credit to private sector, % of GDP")
+    es.axes(bot, units="Real GDP per person, % change (annual faint, 5-yr avg bold)")
+    es.finish(
+        fig,
+        title="Deep but not dynamic",
+        subtitle="Private credit and economic growth, on separate scales, 1990-2023",
+        source=SOURCE, note=LATAM_NOTE, top_in=1.30,
+    )
+    fig.savefig(FIGS / "chart1b_panels.png", dpi=200)
+    plt.close(fig)
+
+
+def chart2_scatter(d: pd.DataFrame):
+    """Chart 2: ΔCredit/GDP against growth, with OLS fits by region.
+
+    Hyperinflation country-years are drawn hollow. They are kept in the baseline
+    regression for fidelity to the plan but, visually, they are exactly the
+    high-leverage points that a reader should discount.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+    d = d.assign(region=np.where(d["latam"] == 1, "LatAm", "USA"))
+
+    for region, grp in d.groupby("region"):
+        c = es.SERIES[region]
+        clean, hyp = grp[~grp["hyper"]], grp[grp["hyper"]]
+        ax.scatter(clean["d_credit"], clean["gdp_pc_growth"], s=30, color=c,
+                   alpha=0.70, edgecolor=es.SURFACE, linewidth=0.7, zorder=3)
+        ax.scatter(hyp["d_credit"], hyp["gdp_pc_growth"], s=34, facecolor="none",
+                   edgecolor=c, linewidth=1.3, zorder=3)
+        # Fit on the full regional sample, matching the baseline regression.
+        slope, intercept = np.polyfit(grp["d_credit"], grp["gdp_pc_growth"], 1)
+        xs = np.linspace(grp["d_credit"].min(), grp["d_credit"].max(), 50)
+        ax.plot(xs, intercept + slope * xs, color=c, lw=2, zorder=4)
+        # Round before formatting, else a slope of -0.0004 prints as "-0.000".
+        ax.annotate(f"{region}: slope {round(slope, 3) + 0.0:+.3f}",
+                    (xs[-1], intercept + slope * xs[-1]), xytext=(6, 0),
+                    textcoords="offset points", va="center", fontsize=9.5,
+                    color=c, fontweight="bold")
+
+    ax.axvline(0, color=es.GRID, lw=1, zorder=1)
+    ax.set_xlim(-95, 75)
+    es.axes(ax, units="Real GDP per person, % change")
+    ax.set_xlabel("Annual change in credit to private sector, percentage points of GDP",
+                  fontsize=9.5, labelpad=6)
+    es.legend(ax, [("USA", es.SERIES["USA"]), ("LatAm", es.SERIES["LatAm"])],
+              loc="lower left")
+    es.finish(
+        fig,
+        title="No visible payoff",
+        subtitle="Annual credit expansion against growth, country-years 1990-2023",
+        source=SOURCE,
+        note="Hollow markers: hyperinflation years (Brazil pre-1995, Argentina pre-1991), "
+             "where credit/GDP moves with prices rather than lending.",
+        top_in=1.30, right_in=1.15,
+    )
+    fig.savefig(FIGS / "chart2_scatter.png", dpi=200)
+    plt.close(fig)
+
+
+def chart3_too_much_finance(quin: pd.DataFrame, res_quad):
+    """Chart 3: five-year growth against the level of financial depth.
+
+    Tests the plan's diminishing-returns prediction directly. If credit deepening
+    pays off mainly at low levels of development, the cloud should slope down.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+    q = quin.assign(region=np.where(quin["latam"] == 1, "LatAm", "USA"))
+
+    for region, grp in q.groupby("region"):
+        c = es.SERIES[region]
+        ax.scatter(grp["credit_initial"], grp["growth"], s=70, color=c, alpha=0.75,
+                   edgecolor=es.SURFACE, linewidth=1.0, zorder=3)
+
+    # Quadratic fit over the pooled five-year observations.
+    b = np.polyfit(q["credit_initial"], q["growth"], 2)
+    xs = np.linspace(q["credit_initial"].min(), q["credit_initial"].max(), 200)
+    ax.plot(xs, np.polyval(b, xs), color=es.INK, lw=1.8, linestyle=(0, (5, 2)),
+            zorder=4)
+    vertex = -b[1] / (2 * b[0])
+    if q["credit_initial"].min() < vertex < q["credit_initial"].max():
+        ax.axvline(vertex, color=es.GREY, lw=1, linestyle=":", zorder=2)
+        ax.annotate(f"fitted peak\n{vertex:.0f}% of GDP", (vertex, ax.get_ylim()[1]),
+                    xytext=(6, -14), textcoords="offset points", fontsize=9,
+                    color=es.INK_SOFT, va="top", linespacing=1.2)
+
+    es.axes(ax, units="Real GDP per person, average % change over the period")
+    ax.set_xlabel("Credit to private sector at the start of the period, % of GDP",
+                  fontsize=9.5, labelpad=6)
+    es.legend(ax, [("USA", es.SERIES["USA"]), ("LatAm", es.SERIES["LatAm"])],
+              loc="upper right")
+    es.finish(
+        fig,
+        title="Too much finance?",
+        subtitle="Financial depth and subsequent growth, non-overlapping five-year periods",
+        source=SOURCE,
+        note="Dashed line: quadratic fit. One point per country per period; "
+             f"n = {len(q)}. Periods with fewer than three observed years are dropped.",
+        top_in=1.30,
+    )
+    fig.savefig(FIGS / "chart3_too_much_finance.png", dpi=200)
+    plt.close(fig)
